@@ -1,9 +1,9 @@
 import os
 import requests
 from telegram import (
+    Update,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    Update
+    ReplyKeyboardRemove
 )
 from telegram.ext import (
     Updater,
@@ -13,6 +13,9 @@ from telegram.ext import (
     CallbackContext
 )
 
+# =====================
+# VARIABLES DE ENTORNO
+# =====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -23,30 +26,37 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# ====== UTILIDADES ======
+# =====================
+# CONSTANTES DE ESTADO
+# =====================
+ESPERANDO_FOTO = "esperando_foto"
+ESPERANDO_PLACAS = "esperando_placas"
+ESPERANDO_TIPO = "esperando_tipo"
 
-def usuario_autorizado(telegram_id: int):
+# =====================
+# FUNCIONES SUPABASE
+# =====================
+def usuario_autorizado(telegram_id: int) -> bool:
     url = f"{SUPABASE_URL}/rest/v1/usuarios?telegram_id=eq.{telegram_id}&activo=eq.true"
     r = requests.get(url, headers=HEADERS)
     return r.status_code == 200 and len(r.json()) > 0
 
-def guardar_acceso_tierra(data: dict):
+def guardar_acceso_tierra(data: dict) -> bool:
     url = f"{SUPABASE_URL}/rest/v1/accesos_tierra"
     r = requests.post(url, headers=HEADERS, json=data)
     return r.status_code in (200, 201)
 
-# ====== ESTADOS ======
-ESPERANDO_FOTO = 1
-ESPERANDO_PLACAS = 2
-ESPERANDO_TIPO = 3
-
-# ====== COMANDOS ======
-
+# =====================
+# COMANDOS PRINCIPALES
+# =====================
 def start(update: Update, context: CallbackContext):
     telegram_id = update.effective_user.id
+    context.user_data.clear()
 
     if not usuario_autorizado(telegram_id):
-        update.message.reply_text("⛔ Acceso no autorizado.")
+        update.message.reply_text(
+            "⛔ Acceso no autorizado.\nContacta al administrador."
+        )
         return
 
     keyboard = [
@@ -58,74 +68,104 @@ def start(update: Update, context: CallbackContext):
     ]
 
     update.message.reply_text(
-        "✅ Acceso autorizado\nSelecciona una opción:",
+        "✅ Acceso autorizado\n\nSelecciona una opción:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
 
+# =====================
+# FLUJO ACCESO TIERRA
+# =====================
 def acceso_tierra(update: Update, context: CallbackContext):
     context.user_data.clear()
+    context.user_data["estado"] = ESPERANDO_FOTO
+
     update.message.reply_text(
         "📸 Envía la FOTO del vehículo",
         reply_markup=ReplyKeyboardRemove()
     )
-    context.user_data["estado"] = ESPERANDO_FOTO
 
-# ====== MANEJO DE MENSAJES ======
-
+# =====================
+# MANEJO DE MENSAJES
+# =====================
 def manejar_mensajes(update: Update, context: CallbackContext):
+    if "estado" not in context.user_data:
+        return
+
     estado = context.user_data.get("estado")
 
+    # ---- FOTO ----
     if estado == ESPERANDO_FOTO:
         if not update.message.photo:
-            update.message.reply_text("❗ Envía una FOTO, por favor.")
+            update.message.reply_text("❗ Debes enviar una FOTO del vehículo.")
             return
-        context.user_data["foto_file_id"] = update.message.photo[-1].file_id
-        update.message.reply_text("🔤 Ingresa las PLACAS del vehículo:")
+
+        context.user_data["foto_id"] = update.message.photo[-1].file_id
         context.user_data["estado"] = ESPERANDO_PLACAS
 
-    elif estado == ESPERANDO_PLACAS:
+        update.message.reply_text("🔤 Ingresa las PLACAS del vehículo:")
+        return
+
+    # ---- PLACAS ----
+    if estado == ESPERANDO_PLACAS:
         context.user_data["placas"] = update.message.text
+        context.user_data["estado"] = ESPERANDO_TIPO
+
         keyboard = [
             ["Residente"],
             ["Invitado"],
             ["Proveedor"],
             ["Trabajador"]
         ]
+
         update.message.reply_text(
             "👤 Selecciona el TIPO DE INGRESO:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
-        context.user_data["estado"] = ESPERANDO_TIPO
+        return
 
-    elif estado == ESPERANDO_TIPO:
-        tipo = update.message.text
+    # ---- TIPO ----
+    if estado == ESPERANDO_TIPO:
         telegram_id = update.effective_user.id
 
         data = {
-            "usuario_id": None,
             "zona_id": 1,  # Base 1
-            "placas": context.user_data["placas"],
-            "tipo_ingreso": tipo
+            "placas": context.user_data.get("placas"),
+            "tipo_ingreso": update.message.text
         }
 
         guardar_acceso_tierra(data)
+
+        context.user_data.clear()
 
         update.message.reply_text(
             "✅ Acceso registrado correctamente",
             reply_markup=ReplyKeyboardRemove()
         )
-        context.user_data.clear()
+
         start(update, context)
 
-# ====== MAIN ======
-
+# =====================
+# MAIN
+# =====================
 def main():
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.regex("^📍 Acceso Tierra"), acceso_tierra))
-    dp.add_handler(MessageHandler(Filters.text | Filters.photo, manejar_mensajes))
+
+    dp.add_handler(
+        MessageHandler(
+            Filters.text & Filters.regex("^📍 Acceso Tierra \\(Base 1\\)$"),
+            acceso_tierra
+        )
+    )
+
+    dp.add_handler(
+        MessageHandler(
+            Filters.text | Filters.photo,
+            manejar_mensajes
+        )
+    )
 
     print("BOT INICIADO CORRECTAMENTE")
     updater.start_polling()
@@ -133,3 +173,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
